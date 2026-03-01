@@ -1,0 +1,255 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import math
+import random
+import time
+
+class HandGestureDetector:
+    def __init__(self, max_num_hands=2, min_detection_confidence=0.7, min_tracking_confidence=0.7):
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=max_num_hands,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence
+        )
+        self.mp_draw = mp.solutions.drawing_utils
+
+    def process_frame(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        results = self.hands.process(rgb)
+        rgb.flags.writeable = True
+        return results
+
+    @staticmethod
+    def is_finger_curled(landmarks, finger_indices):
+        pip_y = landmarks[finger_indices[1]].y
+        tip_y = landmarks[finger_indices[3]].y
+        return tip_y > pip_y
+
+    @staticmethod
+    def is_index_extended(landmarks, index_indices):
+        mcp_y = landmarks[index_indices[0]].y
+        pip_y = landmarks[index_indices[1]].y
+        dip_y = landmarks[index_indices[2]].y
+        tip_y = landmarks[index_indices[3]].y
+        return tip_y < dip_y < pip_y < mcp_y
+
+    @classmethod
+    def detect_gesture(cls, hand_landmarks):
+        THUMB = [1,2,3,4]
+        INDEX = [5,6,7,8]
+        MIDDLE = [9,10,11,12]
+        RING = [13,14,15,16]
+        PINKY = [17,18,19,20]
+
+        middle_curled = cls.is_finger_curled(hand_landmarks.landmark, MIDDLE)
+        ring_curled = cls.is_finger_curled(hand_landmarks.landmark, RING)
+        pinky_curled = cls.is_finger_curled(hand_landmarks.landmark, PINKY)
+        other_fingers_curled = middle_curled and ring_curled and pinky_curled
+
+        if not other_fingers_curled:
+            return "NONE"
+
+        thumb_tip = hand_landmarks.landmark[THUMB[3]]
+        index_tip = hand_landmarks.landmark[INDEX[3]]
+        distance = math.sqrt((thumb_tip.x-index_tip.x)**2 + (thumb_tip.y-index_tip.y)**2)
+
+        if distance < 0.05:
+            return "THUMB_INDEX_HOLD"
+
+        if cls.is_index_extended(hand_landmarks.landmark, INDEX):
+            return "INDEX_UP"
+
+        return "NONE"
+
+class EffectOverlay:
+    def __init__(self):
+        self.frame_count = 0
+
+    def draw_spiral_sphere(self, frame, center, base_radius, color, mode="BLUE"):
+        self.frame_count += 1
+        overlay = frame.copy()
+        h, w, _ = frame.shape
+
+        # Core Glow 
+        for r in range(base_radius, base_radius+15):
+            alpha = (1 - (r-base_radius)/15)**2 * 0.6
+            cv2.circle(overlay, center, r, color, -1)
+            cv2.addWeighted(overlay, alpha, frame, 1-alpha, 0, frame)
+
+        # spiral Rings 
+        num_rings = 5
+        for i in range(num_rings):
+            angle = self.frame_count*5 + i*72
+            radius = base_radius + i*10 + 5*math.sin(self.frame_count*0.3+i)
+            x_offset = int(radius * math.cos(math.radians(angle)))
+            y_offset = int(radius * math.sin(math.radians(angle)))
+            ring_color = tuple(min(255,int(c*0.7)) for c in color)
+            cv2.circle(frame, (center[0]+x_offset, center[1]+y_offset), 3, ring_color, -1)
+
+        #  Particles 
+        for _ in range(15):
+            rand_angle = np.random.uniform(0, 2*np.pi)
+            rand_radius = np.random.uniform(base_radius, base_radius+40)
+            px = int(center[0] + rand_radius*np.cos(rand_angle))
+            py = int(center[1] + rand_radius*np.sin(rand_angle))
+            particle_color = tuple(min(255,int(c*random.uniform(0.6,1))) for c in color)
+            cv2.circle(frame, (px,py), random.randint(2,3), particle_color, -1)
+
+        #  Mode Specific 
+        if mode=="PURPLE":
+            swirl_color = (255,0,255)
+            swirl_radius = base_radius + 10
+            swirl_angle = self.frame_count*10
+            x_offset = int(swirl_radius*math.cos(np.radians(swirl_angle)))
+            y_offset = int(swirl_radius*math.sin(np.radians(swirl_angle)))
+            cv2.circle(frame, (center[0]+x_offset, center[1]+y_offset), 3, swirl_color, -1)
+
+        return frame
+
+
+class DashEffect:
+    def __init__(self):
+        self.effects = []  # multiple active effects
+
+    def spawn(self, center, color, mode):
+        effect = {
+            "start_time": time.time(),
+            "center": center,
+            "color": color,
+            "mode": mode,
+            "exploded": False
+        }
+        self.effects.append(effect)
+
+    def update(self, frame):
+        now = time.time()
+        h, w, _ = frame.shape
+        screen_center = (w//2, h//2)
+
+        new_effects = []
+        for e in self.effects:
+            elapsed = now - e["start_time"]
+
+            #  Dash Phase 
+            if elapsed < 5:
+                t = elapsed / 5
+                dash_x = int((1-t)*e["center"][0] + t*screen_center[0])
+                dash_y = int((1-t)*e["center"][1] + t*screen_center[1])
+                radius = int(30 + 50*t)
+
+                # spinning core
+                num_rings = 5
+                for i in range(num_rings):
+                    angle = elapsed*360 + i*72
+                    ring_radius = radius + i*10
+                    x_offset = int(ring_radius * math.cos(math.radians(angle)))
+                    y_offset = int(ring_radius * math.sin(math.radians(angle)))
+                    ring_color = tuple(min(255,int(c*0.7)) for c in e["color"])
+                    cv2.circle(frame, (dash_x+x_offset, dash_y+y_offset), 3, ring_color, -1)
+
+                # core
+                cv2.circle(frame, (dash_x,dash_y), radius, e["color"], -1)
+                new_effects.append(e)
+
+            #  Explosion Phase 
+            elif not e["exploded"]:
+                e["exploded"] = True
+                for _ in range(100):  # radial particles
+                    angle = random.uniform(0, 2*np.pi)
+                    speed = random.uniform(5,15)
+                    particle_radius = random.randint(2,5)
+                    px = int(screen_center[0] + math.cos(angle)*speed*10)
+                    py = int(screen_center[1] + math.sin(angle)*speed*10)
+                    particle_color = tuple(min(255,int(c*random.uniform(0.6,1))) for c in e["color"])
+                    cv2.circle(frame, (px,py), particle_radius, particle_color, -1)
+                # skip keeping exploded effect
+
+        self.effects = new_effects
+        return frame
+
+
+class GestureSmoother:
+    def __init__(self, buffer_size=5):
+        self.buffer_size = buffer_size
+        self.history = {}
+
+    def update(self, hand_id, gesture):
+        if hand_id not in self.history:
+            self.history[hand_id] = []
+        self.history[hand_id].append(gesture)
+        if len(self.history[hand_id]) > self.buffer_size:
+            self.history[hand_id].pop(0)
+        return max(set(self.history[hand_id]), key=self.history[hand_id].count)
+
+
+def main():
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT,720)
+
+    detector = HandGestureDetector()
+    effect = EffectOverlay()
+    smoother = GestureSmoother()
+    dash_manager = DashEffect()
+
+    COLOR_BLUE = (255,150,50)
+    COLOR_RED = (50,50,255)
+    COLOR_PURPLE = (255,50,200)
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+        frame = cv2.flip(frame,1)
+        h,w,c = frame.shape
+        output_frame = frame.copy()
+
+        results = detector.process_frame(frame)
+
+        if results.multi_hand_landmarks and results.multi_handedness:
+            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                detector.mp_draw.draw_landmarks(
+                    output_frame, hand_landmarks, detector.mp_hands.HAND_CONNECTIONS,
+                    detector.mp_draw.DrawingSpec(color=(255,255,255),thickness=1,circle_radius=1),
+                    detector.mp_draw.DrawingSpec(color=(200,200,200),thickness=1)
+                )
+
+                mp_hand_label = results.multi_handedness[idx].classification[0].label
+                actual_hand = "Right" if mp_hand_label=="Left" else "Left"
+
+                raw_gesture = detector.detect_gesture(hand_landmarks)
+                gesture = smoother.update(actual_hand, raw_gesture)
+
+                center = None
+                if gesture=="THUMB_INDEX_HOLD":
+                    thumb_tip = hand_landmarks.landmark[4]
+                    index_tip = hand_landmarks.landmark[8]
+                    center = (int((thumb_tip.x+index_tip.x)/2*w), int((thumb_tip.y+index_tip.y)/2*h))
+                    output_frame = effect.draw_spiral_sphere(output_frame, center, 30, COLOR_PURPLE, mode="PURPLE")
+                    dash_manager.spawn(center, COLOR_PURPLE, "PURPLE")
+                elif gesture=="INDEX_UP":
+                    index_tip = hand_landmarks.landmark[8]
+                    center = (int(index_tip.x*w), int(index_tip.y*h))
+                    if actual_hand=="Right":
+                        output_frame = effect.draw_spiral_sphere(output_frame, center, 30, COLOR_BLUE, mode="BLUE")
+                        dash_manager.spawn(center, COLOR_BLUE, "BLUE")
+                    else:
+                        output_frame = effect.draw_spiral_sphere(output_frame, center, 30, COLOR_RED, mode="RED")
+                        dash_manager.spawn(center, COLOR_RED, "RED")
+
+        # Update all dash/explosion effects
+        output_frame = dash_manager.update(output_frame)
+
+        cv2.imshow("Gojo Hollow Energy Effect", output_frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key==ord('q') or key==27:
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__=="__main__":
+    main()
